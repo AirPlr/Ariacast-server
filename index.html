@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AudioCast Web Player</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #1a1a1a;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .player-card {
+            background: #2d2d2d;
+            padding: 2rem;
+            border-radius: 16px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            text-align: center;
+            width: 90%;
+            max-width: 400px;
+        }
+        h1 { margin: 0 0 1rem 0; font-size: 1.5rem; }
+        .status { color: #888; margin-bottom: 2rem; font-size: 0.9rem; }
+        .status.connected { color: #4CAF50; }
+        .controls { display: flex; gap: 1rem; justify-content: center; margin-bottom: 1.5rem; align-items: center; }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover { background: #45a049; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        button.stop { background: #f44336; }
+        button.stop:hover { background: #d32f2f; }
+        
+        input[type=range] { vertical-align: middle; }
+
+        .metadata { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #444; }
+        .track-title { font-weight: bold; font-size: 1.1rem; margin-bottom: 0.25rem; }
+        .track-artist { color: #bbb; }
+        #visualizer { width: 100%; height: 60px; background: #222; margin-bottom: 1rem; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="player-card">
+        <h1>AudioCast Player</h1>
+        <div id="status" class="status">Disconnected</div>
+        
+        <canvas id="visualizer"></canvas>
+
+        <div class="controls">
+            <button id="btn-play">Start Listening</button>
+            <button id="btn-stop" class="stop" disabled>Stop</button>
+        </div>
+        <div class="controls">
+             <label for="volume">Volume: </label>
+             <input type="range" id="volume" min="0" max="100" value="100">
+        </div>
+
+        <div class="metadata">
+            <div id="meta-title" class="track-title">-</div>
+            <div id="meta-artist" class="track-artist">-</div>
+        </div>
+    </div>
+
+    <script>
+        // Audio Context
+        let audioCtx;
+        let gainNode;
+        let nextStartTime = 0;
+        let isPlaying = false;
+        let wsAudio;
+        let wsMeta;
+        let sampleRate = 48000;
+        let channels = 2;
+        
+        // UI Elements
+        const statusEl = document.getElementById('status');
+        const btnPlay = document.getElementById('btn-play');
+        const btnStop = document.getElementById('btn-stop');
+        const volSlider = document.getElementById('volume');
+        const canvas = document.getElementById('visualizer');
+        const ctxCanvas = canvas.getContext('2d');
+
+        // Visualizer
+        let analyser;
+        let dataArray;
+        
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                
+                // Gain Node (Volume)
+                gainNode = audioCtx.createGain();
+                gainNode.gain.value = volSlider.value / 100;
+                gainNode.connect(audioCtx.destination);
+                
+                // Analyser (Visuals)
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 256;
+                // We do NOT connect analyser to destination in series anymore
+                // We will connect source to both Gain (Audio) and Analyser (Visuals)
+                
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+                drawVisualizer();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        }
+        
+        volSlider.oninput = () => {
+             if (gainNode) {
+                 gainNode.gain.value = volSlider.value / 100;
+             }
+        };
+
+        function drawVisualizer() {
+            requestAnimationFrame(drawVisualizer);
+            if (!analyser) return;
+
+            const width = canvas.width;
+            const height = canvas.height;
+            
+            analyser.getByteFrequencyData(dataArray);
+
+            ctxCanvas.fillStyle = '#222';
+            ctxCanvas.fillRect(0, 0, width, height);
+
+            const barWidth = (width / dataArray.length) * 2.5;
+            let barHeight;
+            let x = 0;
+
+            for(let i = 0; i < dataArray.length; i++) {
+                barHeight = dataArray[i] / 2;
+                ctxCanvas.fillStyle = `rgb(${barHeight + 100}, 50, 50)`;
+                ctxCanvas.fillRect(x, height - barHeight, barWidth, barHeight);
+                x += barWidth + 1;
+            }
+        }
+
+        function connect() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = window.location.host;
+            
+            // Connect to Audio Stream
+            wsAudio = new WebSocket(`${protocol}//${host}/listen`);
+            wsAudio.binaryType = 'arraybuffer';
+            
+            wsAudio.onopen = () => {
+                statusEl.textContent = 'Connected (Buffering...)';
+                statusEl.classList.add('connected');
+                isPlaying = true;
+                btnPlay.disabled = true;
+                btnStop.disabled = false;
+                console.log("WS Audio Connected");
+            };
+
+            wsAudio.onmessage = (event) => {
+                if (typeof event.data === 'string') {
+                    // Config message
+                    const config = JSON.parse(event.data);
+                    if (config.sample_rate) sampleRate = config.sample_rate;
+                    if (config.channels) channels = config.channels;
+                    console.log(`Config: ${sampleRate}Hz, ${channels}ch`);
+                    statusEl.textContent = `Connected (${sampleRate}Hz, ${channels}ch)`;
+                } else {
+                    // Audio Data (ArrayBuffer)
+                    scheduleAudio(event.data);
+                }
+            };
+
+            wsAudio.onclose = () => {
+                statusEl.textContent = 'Disconnected';
+                statusEl.classList.remove('connected');
+                stop();
+            };
+
+            // Connect to Metadata
+            wsMeta = new WebSocket(`${protocol}//${host}/metadata`);
+            wsMeta.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === "metadata" || msg.type === "update") {
+                        const data = msg.data || {};
+                        document.getElementById('meta-title').textContent = data.title || '-';
+                        document.getElementById('meta-artist').textContent = data.artist || '-';
+                    }
+                } catch(e) {}
+            };
+        }
+
+        function scheduleAudio(buffer) {
+            // Convert Int16 PCM to Float32
+            const int16 = new Int16Array(buffer);
+            const float32 = new Float32Array(int16.length);
+            for (let i = 0; i < int16.length; i++) {
+                float32[i] = int16[i] / 32768.0;
+            }
+
+            // De-interleave if stereo
+            const bufferChannels = channels; // usually 2
+            const frameCount = float32.length / bufferChannels;
+            
+            const audioBuffer = audioCtx.createBuffer(bufferChannels, frameCount, sampleRate);
+            
+            for (let channel = 0; channel < bufferChannels; channel++) {
+                const nowBuffering = audioBuffer.getChannelData(channel);
+                for (let i = 0; i < frameCount; i++) {
+                    nowBuffering[i] = float32[i * bufferChannels + channel];
+                }
+            }
+
+            const source = audioCtx.createBufferSource();
+            source.buffer = audioBuffer;
+            
+            // Connect to Audio Output (via Gain)
+            source.connect(gainNode);
+            
+            // Connect to Visualizer
+            source.connect(analyser);
+            
+            // Scheduling
+            // Ensure we don't schedule in the past
+            const startTime = Math.max(audioCtx.currentTime, nextStartTime);
+            source.start(startTime);
+            
+            nextStartTime = startTime + audioBuffer.duration;
+            
+            // Basic drift correction: if we fall too far behind, jump ahead
+            if (nextStartTime < audioCtx.currentTime) {
+                nextStartTime = audioCtx.currentTime;
+            }
+             // If we are too far ahead (latency), that's fine, it's buffering.
+        }
+
+        function stop() {
+            isPlaying = false;
+            btnPlay.disabled = false;
+            btnStop.disabled = true;
+            if (wsAudio) wsAudio.close();
+            if (wsMeta) wsMeta.close();
+            if (audioCtx) audioCtx.suspend();
+            nextStartTime = 0;
+        }
+
+        btnPlay.onclick = () => {
+            initAudio();
+            connect();
+        };
+
+        btnStop.onclick = stop;
+    </script>
+</body>
+</html>
