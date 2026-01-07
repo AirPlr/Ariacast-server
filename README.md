@@ -1,61 +1,41 @@
-# AriaCast
+# AriaCast Server
 
-**Complete high-performance audio streaming solution for your local network.**
+**High-performance, low-latency PCM audio streaming over WebSockets.**
 
-AriaCast is a comprehensive project that enables streaming audio from Android devices to custom receivers on your local network. It consists of two main components: an Android application for capturing and transmiting audio, and a lightweight Python server that acts as a receiver/speaker.
+AriaCast Server is a lightweight, bidirectional audio streaming receiver written in Python. It transforms any device (Windows, Linux, macOS, Raspberry Pi) into a network "speaker" capable of receiving raw PCM audio, synchronizing metadata in real-time, and offering remote volume control.
 
-## Components
+Designed for stability and minimal overhead, it uses binary WebSockets for audio transport while maintaining fallback compatibility for standard HTTP players.
 
-### 📱 AriaCast Android App
+## Features
 
-**Stream anything, anywhere.**
+- **Hybrid Audio Transport**:
+  - **WebSocket Stream**: Low-latency raw PCM transmission (48kHz/16-bit default).
+  - **HTTP Stream**: `/stream.wav` endpoint for compatibility with generic players (VLC, Browser).
+- **Bidirectional Control**:
+  - Native system volume control (Windows `pycaw` support with PowerShell fallback).
+  - Real-time metadata synchronization (Title, Artist, Artwork).
+- **Adaptive Buffering**: Smart server-side buffering to handle network jitter.
+- **Auto-Discovery**: Dual-stack discovery using Multicast DNS (Bonjour/ `_audiocast._tcp`) and custom UDP broadcast.
+- **Cross-Platform**: Core logic in Python with platform-specific extensions.
 
-AriaCast is an Android application that lets you stream **any** audio playing on your device (Spotify, YouTube Music, Pocket Casts, etc.) to your custom server. It captures internal audio directly from the device and sends it to a designated receiver in real-time.
-
-*   **Universal Audio Capture**: Works with any app that plays audio.
-*   **Rich Metadata**: Automatically detects what's playing and syncs title, artist, album, and artwork to the receiver.
-*   **Quick Settings Tile**: Start and stop casting instantly from your notification shade without opening the app.
-*   **Auto-Discovery**: Automatically finds AriaCast receivers on your network.
-
-### 🔊 AriaCast Protocol Server
-
-**Turn any device into a Hi-Fi Wireless Speaker.**
-
-The server component is a high-performance Python application designed to receive the stream from the AriaCast app. It transforms any computer (Windows, Linux, macOS, Raspberry Pi) into an endpoint speaker.
-
-*   **Low Latency**: Uses binary WebSockets for efficient PCM audio transport.
-*   **Robust Playback**: Features adaptive buffering to handle network jitter without skipping.
-*   **Remote Control**: Allows the app to control the server's system volume explicitly.
-*   **Hybrid Stream**: Also provides a standard HTTP WAV stream (`/stream.wav`) for compatibility with VLC or web browsers.
-
----
-
-## 🚀 Getting Started (Server)
-
-The code in this repository's root allows you to run the **AriaCast Server**.
-
-### Prerequisites
-
-- Python 3.9 or higher
-- Network access (Port 8090 default)
-
-### Installation
+## Installation
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/yourusername/ariacast.git
-   cd ariacast
+   git clone https://github.com/yourusername/ariacast-server.git
+   cd ariacast-server
    ```
 
 2. **Install dependencies**:
+   Ensure you have Python 3.9+ installed.
    ```bash
    pip install -r requirements.txt
    ```
-   *Note: On Windows, `pycaw` (included) is used for native volume control. On Linux, `sounddevice` requires PortAudio (`sudo apt-get install libportaudio2`).*
+   *Note: On Windows, some build tools might be required for `pycaw` or `sounddevice` depending on your environment. On Linux, you may need `libportaudio2`.*
 
-### Usage
+## Usage
 
-Start the server using the launcher script:
+Start the server using the provided launcher script:
 
 ```bash
 python start.py
@@ -73,33 +53,157 @@ python start.py -v
 # Run with a specific configuration profile (see config_examples.py)
 python start.py -c living_room
 
-# Web-only mode (if you just want the stream endpoint without local playback)
+# Run in web-only mode (no local playback, just stream relay)
 python start.py --web-only
 ```
 
 ---
 
-## 📡 Protocol Specification
+# AriaCast Protocol Specification
 
-AriaCast uses a custom protocol over WebSockets for minimum latency and maximum control.
-For detailed information on message formats, endpoints, and the discovery process, please refer to the [Protocol Specification](PROTOCOL.md).
+## Overview
 
-### Quick Protocol Overview
+AriaCast is a protocol for streaming low-latency, high-quality audio over IP networks to distributed audio devices. The protocol is designed for simplicity, reliability, and minimal latency.
 
-| Endpoint | Type | Description |
-|----------|------|-------------|
-| `/audio` | WebSocket | Accepts binary PCM frames (48kHz/16-bit by default). |
-| `/control`| WebSocket | JSON-based volume and playback control. |
-| `/metadata`| WebSocket | Pub/Sub for track information. |
-| `/stats` | WebSocket | Real-time buffer and playback statistics. |
-| `/listen` | WebSocket | For web-based audio listeners. |
+## Architecture
 
-## 🌐 Web Client
+AriaCast uses a **client-server** architecture where:
+- **Client**: Streams audio to the server, sends metadata, and controls playback
+- **Server**: Receives audio, provides playback, and exposes control/metadata endpoints
 
-The server includes a built-in feedback player accessible at:
+### WebSocket Endpoints
+
+| Endpoint | Type | Direction | Description |
+|----------|------|-----------|-------------|
+| `/audio` | Binary | Client → Server | PCM audio stream |
+| `/stats` | JSON | Server → Client | Playback statistics |
+| `/control` | JSON | Bidirectional | Volume and playback control |
+| `/metadata` | JSON | Bidirectional | Track metadata (title, artist, artwork) |
+
+## Discovery Phase
+
+### Step 1: Discover Available Servers
+
+Clients discover AriaCast servers using one of two methods:
+
+#### Method A: mDNS (Primary, Recommended)
+
+Browse for services of type `_audiocast._tcp` using mDNS/Bonjour:
+
+```
+Service Type: _audiocast._tcp.local.
+```
+
+**TXT Records** (advertising the server's capabilities):
+
+| Key | Type | Example | Description |
+|---|---|---|---|
+| `name` | String | "Living Room Speaker" | Human-readable server name |
+| `version` | String | "1.0" | Protocol version |
+| `codecs` | String | "PCM" | Comma-separated supported codecs |
+| `samplerate` | String | "48000" | Audio sample rate in Hz |
+| `channels` | String | "2" | Number of audio channels |
+| `platform` | String | "RaspberryPi" | Server platform identifier |
+
+#### Method B: UDP Broadcast (Fallback)
+
+If mDNS is unavailable or times out:
+
+1. **Send Discovery Request**:
+   - Destination: Broadcast address (e.g., `255.255.255.255`) or network broadcast
+   - Port: `12888` (UDP)
+   - Message: ASCII string `"DISCOVER_ARIACAST"`
+
+2. **Receive Response**:
+   - Source: Server IP address
+   - Port: `12888` (UDP)
+   - Message: JSON object (UTF-8 encoded)
+
+### Step 2: Connect to Server
+
+Once a server is discovered, establish connections to the WebSocket endpoints.
+
+## Streaming Protocol
+
+### Audio Streaming (`/audio` endpoint)
+
+Audio data is sent as **binary WebSocket frames**:
+
+| Component | Details |
+|---|---|
+| **Frame Type** | Binary (OpCode 0x2) |
+| **Frame Size** | Exactly 3840 bytes |
+| **Content** | Raw PCM audio data |
+| **Timing** | Frames should be sent at 50 frames/second (20ms intervals) |
+
+**Audio Data Format**:
+```
+Sample Rate:     48000 Hz
+Bit Depth:       16-bit signed integer (little-endian)
+Channels:        2 (Stereo)
+Duration:        20 milliseconds
+Frame Size:      960 samples × 2 channels × 2 bytes = 3840 bytes
+```
+
+### Control (`/control` endpoint)
+
+The control endpoint allows bidirectional communication for volume and playback control.
+
+**Volume Commands** (Client → Server):
+```json
+{"command": "volume", "direction": "up"}
+{"command": "volume", "direction": "down"}
+{"command": "volume_set", "level": 75}
+```
+
+### Metadata (`/metadata` endpoint)
+
+The metadata endpoint allows clients to push track information and receive updates.
+
+**Update Metadata** (Client → Server):
+```json
+{
+  "type": "update",
+  "data": {
+    "title": "Song Title",
+    "artist": "Artist Name",
+    "album": "Album Name",
+    "artwork_url": "https://example.com/cover.jpg",
+    "is_playing": true
+  }
+}
+```
+
+## Network Topology
+
+```
+Local Area Network (192.168.1.0/24)
+├─ AudioCast Server
+│  ├─ mDNS Advertiser (_audiocast._tcp)
+│  ├─ UDP Discovery Listener (port 12888)
+│  └─ WebSocket Server (port 12889)
+│
+└─ Clients
+   ├─ Discovery Phase (mDNS or UDP)
+   └─ Streaming Phase (WebSockets)
+```
+
+---
+
+## Web Dashboard
+
+The server includes a built-in web dashboard and player accessible at:
 `http://<server-ip>:8090/`
 
-This allows you to verify the stream or usage effectively as a "web speaker" if the host device doesn't have speakers attached.
+This allows you to listen to the stream directly from a browser or view server statistics.
+
+## Requirements
+
+- `aiohttp` - Async Web Server
+- `sounddevice` - Audio Playback
+- `zeroconf` - mDNS Discovery
+- `numpy` - Audio Buffer Management
+- `pycaw` - Windows Core Audio Library (Optional, for volume control)
 
 ## License
 
