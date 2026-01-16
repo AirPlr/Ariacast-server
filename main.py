@@ -1,5 +1,5 @@
 """
-AudioCast Protocol Server
+AriaCast Protocol Server
 High-performance audio streaming using sounddevice for stable playback.
 """
 
@@ -1006,3 +1006,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
