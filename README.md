@@ -1,3 +1,5 @@
+Same as AriaCast Server but integrates video streaming (as we already leverage MediaProjectionAPI)
+
 # AriaCast Server
 
 **High-performance, low-latency PCM audio streaming over WebSockets with Music Assistant integration.**
